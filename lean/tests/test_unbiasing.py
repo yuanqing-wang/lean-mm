@@ -1,5 +1,5 @@
 from turtle import position
-from lean.forces import InductiveRadialBiasingForce
+from lean.forces import InductiveRadialUnbiasingForce
 from lean.integrators import (
     AnnealedImportanceSamplingOverdampedLangevinIntegrator,
     NonEquilibriumAnnealedImportanceSamplingOverdampedLangevinIntegrator,
@@ -11,7 +11,7 @@ from openmmtools.testsystems import AlanineDipeptideVacuum
 def test_unbiasing():
     adlp = AlanineDipeptideVacuum()
     system, positions = adlp.system, adlp.positions
-    force = InductiveRadialBiasingForce(n=system.getNumParticles())    
+    force = InductiveRadialUnbiasingForce(n=system.getNumParticles())    
     integrator = NonEquilibriumAnnealedImportanceSamplingOverdampedLangevinIntegrator(
         temperature=300 * unit.kelvin,
         friction=1.0 / unit.picoseconds,

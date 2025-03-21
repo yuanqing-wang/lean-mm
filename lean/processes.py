@@ -45,6 +45,8 @@ def annealed_importance_sampling(
         t = float(idx) / steps
         integrator.t = t
         integrator.step(1)
+        energy = context.getState(getEnergy=True).getPotentialEnergy()
+        print(energy)
         
     # get the positions
     state = context.getState(getPositions=True)

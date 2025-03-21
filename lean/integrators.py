@@ -2,6 +2,8 @@ from openmm import unit
 from openmmtools.integrators import ThermostatedIntegrator
 import torch
 import numpy as np
+from .unit import LENGTH
+from .forces import GROUPS
 
 class BaseOverdampedLangevinIntegrator(ThermostatedIntegrator):
     """Overdamped Langevin. """
@@ -21,7 +23,7 @@ class BaseOverdampedLangevinIntegrator(ThermostatedIntegrator):
 
         # propagation
         self.addUpdateContextState()
-        self.addComputeTemperatureDependentConstants({"epsilon": "dt/gamma/m"})
+        self.addComputeTemperatureDependentConstants({"epsilon": "1/(gamma*m)"})
         self.addComputePerDof("w", "gaussian")
         
         # compute total force
@@ -29,7 +31,7 @@ class BaseOverdampedLangevinIntegrator(ThermostatedIntegrator):
 
         # position update
         self.addComputePerDof(
-            "x", "x+epsilon*F + sqrt(2*epsilon*kT)*w"
+            "x", "x+epsilon*F*dt + sqrt(2*epsilon*kT*dt)*w"
         )
         
         self.addConstrainPositions()
@@ -66,12 +68,12 @@ class AnnealedImportanceSamplingOverdampedLangevinIntegrator(BaseOverdampedLange
     def _F(self):
         self.addComputePerDof(
             "F", 
-            "f0*_t"
+            f"f{GROUPS.SYSTEM}*_t"
         )
         
         self.addComputePerDof(
             "F", 
-            "F+f1*(1-_t)"
+            f"F+f{GROUPS.GAUSSIAN}*(1-_t)"
         )
                 
     @property
@@ -93,49 +95,53 @@ class NonEquilibriumAnnealedImportanceSamplingOverdampedLangevinIntegrator(BaseO
         super().__init__(temperature, friction, stepsize)
         self._forward()
     
-    def _F(self):    
-        self.addPerDofVariable("_F", 0)
-            
+    def _F(self):             
         self.addComputePerDof(
             "_F", 
-            "f0*_t"
+            f"f{GROUPS.SYSTEM}*_t"
         )
         
         self.addComputePerDof(
             "_F", 
-            "F+f1*(1-_t)"
+            f"_F+f{GROUPS.GAUSSIAN}*(1-_t)"
         )
         
         self.addComputePerDof(
-            "F", 
-            "_F+f2"
+            "F",
+            f"_F+f{GROUPS.UNBIASING}"
         )
         
     def _forward(self):
-        self.addGlobalVariable("_t", 1)
         self.addGlobalVariable("A", 0)
+        self.addGlobalVariable("_t", 1)
+        self.addPerDofVariable("_F", 0)
         
         self.addPerDofVariable("x_old", 0)
         self.addComputePerDof("x_old", "x")
         
         self.addGlobalVariable("energy_old", 0)
-        self.addComputeGlobal("energy_old", "energy0")
-        self.addComputeGlobal("energy_old", "energy_old+energy1")
+        self.addComputeGlobal("energy_old", f"energy{GROUPS.SYSTEM}*_t")
+        self.addComputeGlobal("energy_old", f"energy_old+energy{GROUPS.GAUSSIAN}*(1-_t)")
         
         super()._forward()
         
         self.addGlobalVariable("energy_new", 0)
-        self.addComputeGlobal("energy_new", "energy0")
-        self.addComputeGlobal("energy_new", "energy_new+energy1")
+        self.addComputeGlobal("energy_new", f"energy{GROUPS.SYSTEM}*_t")
+        self.addComputeGlobal("energy_new", f"energy_new+energy{GROUPS.GAUSSIAN}*(1-_t)")
         
-        scale = "1/(4*kT*epsilon)"
-        delta_x = "x-x_old"
-        original_force = "dt*epsilon*_F"
-        new_force = "dt*epsilon*f2"
-        r_plus = f"{scale}*({delta_x}+{original_force}+{new_force})^2"
-        r_minus = f"{scale}*({delta_x}+{original_force}-{new_force})^2"
-        delta_a = f"(energy_old/kT)-(energy_new/kT)+{r_plus}-{r_minus}"
-        self.addComputeGlobal("A", f"A+{delta_a}")
+        scale = "1/(4*epsilon*kT*dt)"
+        delta_x = "(x-x_old)"
+        original_drift = "dt*epsilon*_F"
+        new_drift = f"dt*epsilon*f{GROUPS.UNBIASING}"
+        r_plus = f"{scale}*({delta_x}-{original_drift}-{new_drift})^2"
+        r_minus = f"{scale}*(-{delta_x}-{original_drift}+{new_drift})^2"
+        
+        self.addComputeSum("r_plus", r_plus)
+        self.addComputeSum("r_minus", r_minus)
+        
+        # delta_a = "(energy_old/kT)-(energy_new/kT)+r_plus-r_minus"
+        delta_a = "r_plus-r_minus"
+        self.addComputeGlobal("A", f"{delta_a}")
         
     @property
     def A(self):
@@ -145,27 +151,29 @@ class NonEquilibriumAnnealedImportanceSamplingOverdampedLangevinIntegrator(BaseO
     def A(self, value):
         self.setGlobalVariableByName("A", value)
         
+    @property
+    def t(self):
+        return self.getGlobalVariableByName("_t")
+    
+    @t.setter
+    def t(self, value):
+        self.setGlobalVariableByName("_t", value)
+        
 def integrate(
     force,
     system,
     context,
     integrator,
     steps,
-    num_samples,
+    collect,
+    T: float=1.0,
 ):
     # set positions
-    positions = np.random.randn(system.getNumParticles(), 3) * unit.angstrom
+    positions = np.random.randn(system.getNumParticles(), 3) * LENGTH
     context.setPositions(positions)
     
     # parametrize the system
     force.parametrize(system, context)
-    
-    # sample the positions to collect
-    collect = np.random.choice(
-        range(steps),
-        num_samples,
-        replace=False,
-    )
     
     # run the simulation
     xs = []
@@ -174,14 +182,14 @@ def integrate(
     
     integrator.A = 0.0
     for t in range(steps):
-        _t = float(t) / steps
-        context.setParameter('t', _t)
+        _t = T * float(t) / steps
+        context.setParameter("t", _t)
+        integrator.t = _t
         integrator.step(1)
         if t in collect:
-            x = context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+            x = context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(LENGTH)
             xs.append(x)
             ts.append(_t)
             weights.append(integrator.A)
-    
     return torch.tensor(np.array(xs)), torch.tensor(np.array(ts)), torch.tensor(np.array(weights))
         

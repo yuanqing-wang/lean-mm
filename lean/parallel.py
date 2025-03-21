@@ -1,5 +1,6 @@
 
 import torch
+import numpy as np
 
 def loop_integrate(
     n: int,
@@ -9,7 +10,9 @@ def loop_integrate(
     integrator,
     steps,
     num_samples,
+    T: float=1.0,
 ):
+    collect = np.random.choice(steps, num_samples, replace=False)
     _x, _t, _a = [], [], []
     for idx in range(n):
         x, t, a = force.integrate(
@@ -17,12 +20,11 @@ def loop_integrate(
             context=context,
             integrator=integrator,
             steps=steps,
-            num_samples=num_samples,
+            collect=collect,
+            T=T,
         )
         _x.append(x)
         _t.append(t)
         _a.append(a)
-    for x in _x:
-        print(x.shape)
     _x, _t, _a = torch.stack(_x), torch.stack(_t), torch.stack(_a)
     return _x, _t, _a

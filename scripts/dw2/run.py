@@ -1,9 +1,11 @@
 import sys
 import torch
 import openmm as mm
-from lean.forces import InductiveRadialBiasingForce
+from lean.forces import InductiveRadialUnbiasingForce, GaussianForce
 from lean.integrators import NonEquilibriumAnnealedImportanceSamplingOverdampedLangevinIntegrator as Integrator
 from lean.parallel import loop_integrate
+from lean.loss import action_matching_loss
+from lean import unit
 
 def dw_force(k2=-2.0, k4=0.45, d0=4.0):
     force = mm.CustomBondForce("k2*(r-d0)^2+k4*(r-d0)^4")
@@ -12,40 +14,79 @@ def dw_force(k2=-2.0, k4=0.45, d0=4.0):
     force.addPerBondParameter("d0")
     return force
 
-def dw2():
+def dw(n=2):
     system = mm.System()
     force = dw_force()
-    system.addParticle(1.0)
-    system.addParticle(1.0)
-    force.addBond(0, 1, [-2.0, 0.45, 4.0])
+    k2 = -2.0 * unit.ENERGY / unit.LENGTH**2
+    k4 = 0.45 * unit.ENERGY / unit.LENGTH**4
+    d0 = 4.0 * unit.LENGTH
+    for _ in range(n):
+        system.addParticle(1.0)
+    
+    for idx0 in range(n):
+        for idx1 in range(n):
+            if idx0 < idx1:
+                force.addBond(idx0, idx1, [k2, k4, d0])
     system.addForce(force)
     return system
 
+def ess(a):
+    return ((a.softmax(0) ** 2).sum()).pow(-1)
+    
 def run():
-    system = dw2()
-    force = InductiveRadialBiasingForce(2)
+    system = dw(2)
+    force = InductiveRadialUnbiasingForce(2)
     force.add_force(system)
+    gaussian_force = GaussianForce()
+    gaussian_force.add_force(system)
+    
+    friction = 10.0 / mm.unit.picoseconds
+    stepsize= 1.0 * mm.unit.femtoseconds
+    temperature = 300 * mm.unit.kelvin
+    steps = 10000
+    
     integrator = Integrator(
-        temperature=300 * mm.unit.kelvin,
-        friction=1.0 / mm.unit.picoseconds,
-        stepsize=0.01 * mm.unit.femtoseconds,
+        temperature=temperature,
+        friction=friction,
+        stepsize=stepsize,
     )
+    
+    
+    mass = [system.getParticleMass(i) for i in range(system.getNumParticles())]
+    epsilon = [1 / (mass[i] * friction) for i in range(system.getNumParticles())]
+    epsilon = [_epsilon.value_in_unit(unit.TIME/unit.MASS) for _epsilon in epsilon]
+    epsilon = torch.tensor(epsilon)
+    time_scale = stepsize * steps
+    time_scale = time_scale.value_in_unit(unit.TIME)
     context = mm.Context(system, integrator, mm.Platform.getPlatformByName('Reference'))
     
-    x, t, a = loop_integrate(
-        n=4,
-        force=force,
-        system=system,
-        context=context,
-        integrator=integrator,
-        steps=10000,
-        num_samples=100,
-    )
-    
-    
-    
+    optimizer = torch.optim.Adam(force.parameters(), lr=1e-3)
+    for _ in range(100):
+        optimizer.zero_grad()
+        x, t, a = loop_integrate(
+            n=16,
+            force=force,
+            system=system,
+            context=context,
+            integrator=integrator,
+            steps=steps,
+            num_samples=100,
+            T=1,
+        )
+        
+        _loss = action_matching_loss(
+            unbiasing_force=force,
+            samples=x,
+            times=t,
+            weights=a,
+            epsilon=epsilon,
+            time_scale=time_scale,
+        )
 
-    
-    
+        print(a[:, -1])      
+        print(_loss, ess(a[:, -1]))
+        _loss.backward()
+        optimizer.step()
+        
 if __name__ == "__main__":
     run()
