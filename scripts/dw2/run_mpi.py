@@ -68,18 +68,19 @@ def run():
     )
         
     for _ in range(100):
+        x, t, a = mpi_integrate(
+            n=16,
+            force=force,
+            system=system,
+            context=context,
+            integrator=integrator,
+            steps=steps,
+            num_samples=100,
+            T=1,
+        )
+        
         if get_rank() == 0:
             optimizer.zero_grad()
-            x, t, a = mpi_integrate(
-                n=16,
-                force=force,
-                system=system,
-                context=context,
-                integrator=integrator,
-                steps=steps,
-                num_samples=100,
-                T=1,
-            )
             
             _loss = action_matching_loss(
                 unbiasing_force=force,
