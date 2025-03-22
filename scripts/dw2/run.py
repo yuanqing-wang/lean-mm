@@ -83,8 +83,6 @@ def run():
             time_scale=time_scale,
         )
 
-        print(a[:, -1])      
-        print(_loss, ess(a[:, -1]))
         _loss.backward()
         optimizer.step()
         
